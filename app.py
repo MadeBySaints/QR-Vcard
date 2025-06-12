@@ -4,17 +4,24 @@ import hashlib
 import qrcode
 from datetime import datetime
 import json
+import shutil
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'  # Change this!
+app.secret_key = 'b6f6380c02b54d2cb561305ae2f1e9ca0281ce1a77bbde680000aad8b853ccea'  # Change this!
+# Open a terminal and use:
+# python -c 'import secrets; print(secrets.token_hex(32))'
+# paste the result above.
 
 # Configuration
 USERS_FILE = 'data/users.txt'
 QR_DATA_DIR = 'data'
-QR_IMAGE_DIR = 'static/qrcodes'
-PEPPER = 'your-pepper-value-here'  # Change this!
+QR_IMAGE_DIR = 'static/qrcodes'  # Parent directory for all user QR codes
+PEPPER = 'dec5a2630515519ec51afc9e258748d81e99a54157002b694027ea54e6725c04'  # Change this!
+# Open a terminal and use:
+# python -c 'import secrets; print(secrets.token_hex(32))'
+# paste the result above.
 COLLECT_USER_DATA = True
-ENCRYPT_DATA = False
+ENCRYPT_DATA = True
 
 # Ensure directories exist
 os.makedirs(QR_DATA_DIR, exist_ok=True)
@@ -43,13 +50,38 @@ def get_next_uid():
         return 100010001
     return int(lines[-1].split('|')[0]) + 1
 
+def ensure_user_dir(uid):
+    """Create user-specific directory if it doesn't exist"""
+    user_dir = os.path.join(QR_IMAGE_DIR, str(uid))
+    os.makedirs(user_dir, exist_ok=True)
+    return user_dir
+
 def save_qr_data(uid, qr_name, vcard_string, filename):
     user_file = os.path.join(QR_DATA_DIR, f"user_{uid}.txt")
     data = {
         'qr_name': qr_name,
         'timestamp': datetime.now().isoformat(),
         'filename': filename,
-        'vcard_data': vcard_string
+        'vcard_data': vcard_string if not ENCRYPT_DATA else None,
+        'vcard_encrypted': encrypt_data(vcard_string) if ENCRYPT_DATA else None
+    }
+    with open(user_file, 'a') as f:
+        f.write(json.dumps(data) + '\n')
+
+def encrypt_data(data):
+    """One-way hash data using SHA-256 with application pepper"""
+    if not isinstance(data, str):
+        data = str(data)
+    return hashlib.sha256((data + PEPPER).encode()).hexdigest()
+
+# Example usage in save_qr_data()
+def save_qr_data(uid, qr_name, vcard_string, filename):
+    user_file = os.path.join(QR_DATA_DIR, f"user_{uid}.txt")
+    data = {
+        'qr_name': qr_name,
+        'timestamp': datetime.now().isoformat(),
+        'filename': filename,
+        'vcard_hash': encrypt_data(vcard_string)  # Stores hash instead of raw data
     }
     with open(user_file, 'a') as f:
         f.write(json.dumps(data) + '\n')
@@ -142,10 +174,11 @@ def generate():
     if request.method == 'POST':
         try:
             uid = session['user']['uid']
+            user_dir = ensure_user_dir(uid)  # Get user-specific directory
             qr_name = request.form['qr_name'].strip()
             qr_size = int(request.form.get('qr_size', 10))
             
-            # Build vCard with all standard fields
+            # Build vCard
             vcard_lines = ["BEGIN:VCARD", "VERSION:3.0"]
             
             # Standard fields
@@ -155,23 +188,15 @@ def generate():
                 vcard_lines.append(f"N:{last_name};{first_name};;;")
                 vcard_lines.append(f"FN:{first_name} {last_name}")
             
-            # Process all standard contact fields
-            standard_fields = {
-                'phone_cell': 'TEL;TYPE=CELL',
-                'phone_office': 'TEL;TYPE=WORK',
-                'fax': 'TEL;TYPE=FAX',
-                'email': 'EMAIL',
-                'company': 'ORG',
-                'position': 'TITLE',
-                'website': 'URL',
-                'notes': 'NOTE'
-            }
+            # Contact info
+            if phone := request.form.get('phone_cell', '').strip():
+                vcard_lines.append(f"TEL;TYPE=CELL:{phone}")
+            if email := request.form.get('email', '').strip():
+                vcard_lines.append(f"EMAIL:{email}")
+            if company := request.form.get('company', '').strip():
+                vcard_lines.append(f"ORG:{company}")
             
-            for field, vcard_key in standard_fields.items():
-                if value := request.form.get(field, '').strip():
-                    vcard_lines.append(f"{vcard_key}:{value}")
-            
-            # Process address
+            # Address
             street = request.form.get('street', '').strip()
             city = request.form.get('city', '').strip()
             state = request.form.get('state', '').strip()
@@ -179,10 +204,13 @@ def generate():
             country = request.form.get('country', '').strip()
             
             if any([street, city, state, zip_code, country]):
-                addr = f";;{street};{city};{state};{zip_code};{country}"
-                vcard_lines.append(f"ADR;TYPE=WORK:{addr}")
+                addr = f"{street};{city};{state};{zip_code};{country}"
+                vcard_lines.append(f"ADR;TYPE=WORK:;;{addr}")
             
-            # Process custom fields
+            if website := request.form.get('website', '').strip():
+                vcard_lines.append(f"URL:{website}")
+            
+            # Custom fields
             custom_keys = [k for k in request.form if k.startswith('custom_key_')]
             for key in custom_keys:
                 idx = key.split('_')[-1]
@@ -194,9 +222,9 @@ def generate():
             vcard_lines.append("END:VCARD")
             vcard = "\n".join(vcard_lines)
             
-            # Generate QR code
-            filename = f"{uid}_{int(datetime.now().timestamp())}.png"
-            filepath = os.path.join(QR_IMAGE_DIR, filename)
+            # Generate QR code in user's directory
+            filename = f"{int(datetime.now().timestamp())}.png"
+            filepath = os.path.join(user_dir, filename)
             
             qr = qrcode.QRCode(
                 version=None,
@@ -220,7 +248,14 @@ def generate():
     
     return render_template('generate.html')
 
-# Add these new routes to your Flask app
+@app.route('/track/<filename>')
+def track(filename):
+    if 'user' not in session:
+        return redirect('/login')
+    
+    uid = session['user']['uid']
+    user_dir = os.path.join(QR_IMAGE_DIR, str(uid))
+    return send_file(os.path.join(user_dir, filename), mimetype='image/png')
 
 @app.route('/delete_qr/<filename>', methods=['POST'])
 def delete_qr(filename):
@@ -229,8 +264,9 @@ def delete_qr(filename):
     
     uid = session['user']['uid']
     user_file = os.path.join(QR_DATA_DIR, f"user_{uid}.txt")
+    user_dir = os.path.join(QR_IMAGE_DIR, str(uid))
     
-    # Find and remove the QR entry from user's data file
+    # Remove from user's data file
     if os.path.exists(user_file):
         with open(user_file, 'r') as f:
             lines = f.readlines()
@@ -241,13 +277,13 @@ def delete_qr(filename):
                     data = json.loads(line.strip())
                     if data['filename'] != filename:
                         f.write(line)
-                    else:
-                        # Delete the QR image file
-                        qr_path = os.path.join(QR_IMAGE_DIR, filename)
-                        if os.path.exists(qr_path):
-                            os.remove(qr_path)
                 except:
                     continue
+    
+    # Delete the QR image file
+    qr_path = os.path.join(user_dir, filename)
+    if os.path.exists(qr_path):
+        os.remove(qr_path)
     
     return redirect('/dashboard')
 
@@ -265,22 +301,17 @@ def delete_account():
     if username not in users or users[username][3] != hash_password(password):
         return "Incorrect password", 401
     
-    # Delete all QR images
+    # Delete user's QR directory
+    user_dir = os.path.join(QR_IMAGE_DIR, str(uid))
+    if os.path.exists(user_dir):
+        shutil.rmtree(user_dir)
+    
+    # Delete user data file
     user_file = os.path.join(QR_DATA_DIR, f"user_{uid}.txt")
     if os.path.exists(user_file):
-        with open(user_file, 'r') as f:
-            for line in f:
-                try:
-                    data = json.loads(line.strip())
-                    qr_path = os.path.join(QR_IMAGE_DIR, data['filename'])
-                    if os.path.exists(qr_path):
-                        os.remove(qr_path)
-                except:
-                    continue
-        # Delete user data file
         os.remove(user_file)
     
-    # Remove user from users.txt
+    # Remove from users.txt
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, 'r') as f:
             lines = f.readlines()
@@ -290,13 +321,5 @@ def delete_account():
                 if not line.startswith(f"{uid}|"):
                     f.write(line)
     
-    # Clear session and redirect
     session.pop('user', None)
     return redirect('/login')
-
-@app.route('/track/<filename>')
-def track(filename):
-    return send_file(os.path.join(QR_IMAGE_DIR, filename), mimetype='image/png')
-
-if __name__ == '__main__':
-    app.run(debug=True)
