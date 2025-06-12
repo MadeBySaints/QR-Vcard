@@ -6,6 +6,7 @@ A QR-VCard Generator with a front facing flask website
 A full-featured Flask web app for generating, managing, and serving vCard QR codes with optional data encryption and flat-file user storage. Built for privacy-conscious users and small businesses, this app requires no database and supports per-user dashboards, custom fields, and downloadable codes.
 
 🔧 Features
+
 🔐 User Registration & Login with secure password hashing (sha256 + pepper)
 
 🧾 vCard QR Generation with:
