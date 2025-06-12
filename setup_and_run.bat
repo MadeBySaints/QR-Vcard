@@ -1,7 +1,6 @@
 @echo off
-:: Run vCard QR Flask app with Waitress (global Python install, no venv)
 
-echo Installing required Python packages globally (or user-wide)...
+echo Installing required Python packages
 python -m pip install --upgrade pip
 pip install flask qrcode pillow pycryptodome waitress
 
